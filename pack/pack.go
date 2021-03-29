@@ -4,8 +4,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/spf13/afero"
 	"io/ioutil"
+	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"time"
 
@@ -13,27 +16,73 @@ import (
 	"golang.org/x/mod/zip"
 )
 
+var (
+	Fs = afero.NewOsFs()
+	DirsToRemove = map[string]bool{
+		"cache": true,
+	}
+)
+
 // Module packs the module at the given path and version then
 // outputs the result to the specified output directory
-func Module(path string, version string, outputDirectory string) error {
-	moduleFile, err := getModuleFile(path, version)
+func Module(module string) error {
+	path, err := getModulesFromVCS(module)
 	if err != nil {
-		return fmt.Errorf("get module file: %w", err)
+		return err
 	}
 
-	if err := createZipArchive(path, moduleFile, outputDirectory); err != nil {
-		return fmt.Errorf("create zip archive: %w", err)
+	dirs, err := afero.ReadDir(Fs, path)
+	if err != nil {
+		return err
 	}
 
-	if err := createInfoFile(moduleFile, outputDirectory); err != nil {
-		return fmt.Errorf("create info file: %w", err)
-	}
-
-	if err := copyModuleFile(path, moduleFile, outputDirectory); err != nil {
-		return fmt.Errorf("copy module file: %w", err)
-	}
+	vcsDirs := getVCSDirs(dirs)
+	log.Println(vcsDirs)
 
 	return nil
+}
+
+// Downloads the module and its dependencies from the VCS
+func getModulesFromVCS(module string) (string, error) {
+	path, err := afero.TempDir(Fs, "", "pacmod")
+	if err != nil {
+		return "", err
+	}
+
+	goPath := filepath.Join(path, "gopath")
+
+	if err := Fs.Mkdir(goPath, os.ModeDir); err != nil {
+		return "", err
+	}
+
+	if err := os.Setenv("GOPATH", goPath); err != nil {
+		return "", err
+	}
+
+	cmd := exec.Command(
+		"go", "get", "-v", module,
+	)
+
+	cmd.Dir = path
+	cmd.Stdout = &bytes.Buffer{}
+	cmd.Stderr = &bytes.Buffer{}
+
+	if err := cmd.Run(); err != nil {
+		err = fmt.Errorf("%v: %s", err, cmd.Stderr)
+		return "", err
+	}
+
+	return filepath.Join(goPath, "pkg", "mod"), nil
+}
+
+func getVCSDirs(dirs []os.FileInfo) (ret []os.FileInfo) {
+	for _, dir := range dirs {
+		if _, ok := DirsToRemove[dir.Name()]; !ok {
+			ret = append(ret, dir)
+		}
+	}
+
+	return
 }
 
 func getModuleFile(path string, version string) (*modfile.File, error) {
